@@ -1,6 +1,6 @@
 import asyncio
+import time
 from app.storage import update_task
-
 
 async def long_running_task(task_id: str, input_data: dict):
     try:
@@ -12,7 +12,10 @@ async def long_running_task(task_id: str, input_data: dict):
             update_task(
                 task_id,
                 "running",
-                {"progress": step, "total": total_steps},
+                {
+                    "progress": step,
+                    "total": total_steps,
+                },
             )
 
         result = {
@@ -24,3 +27,8 @@ async def long_running_task(task_id: str, input_data: dict):
 
     except Exception as e:
         update_task(task_id, "error", {"error": str(e)})
+
+def sync_cpu_bound(data: dict) -> dict:
+    # Имитация вычислений, занимающих несколько секунд
+    time.sleep(3)  # блокирует поток
+    return {"computed": data.get("value", 0) * 2}
