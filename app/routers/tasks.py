@@ -1,12 +1,12 @@
 from fastapi import APIRouter, HTTPException, BackgroundTasks
-from app.storage import create_task, get_task, task_queue, cleanup_old_tasks, tasks_storage
-from app.tasks import long_running_task, sync_cpu_bound
-from app.logger import log_info, log_task, log_success
+from app.redis_storage import redis_storage
+from app.queue_manager import task_queue
+from app.tasks import sync_cpu_bound
+from app.logger import log_info, log_success, log_error
 import asyncio
 
 router = APIRouter()
 
-# Роутер для уведомлений
 notify_router = APIRouter(prefix="/notify", tags=["notifications"])
 
 def send_email(email: str, message: str):
@@ -20,29 +20,40 @@ async def notify_email(email: str, message: str, background_tasks: BackgroundTas
     log_info(f"Email уведомление запланировано для {email}")
     return {"status": "email will be sent in background"}
 
-# Роутер для длительных задач
 tasks_router = APIRouter(prefix="/tasks", tags=["long tasks"])
 
 @tasks_router.post("/process")
 async def start_processing(input_data: dict):
-    """Задача попадает в очередь, а не выполняется сразу"""
-    task_id = create_task()
-    # Добавляем задачу в очередь
-    await task_queue.put((task_id, input_data))
-    log_task(task_id, "ДОБАВЛЕНА В ОЧЕРЕДЬ", f"позиция: {task_queue.qsize()}")
-    print(f"📋 Задача {task_id} добавлена в очередь (в очереди: {task_queue.qsize()})")
+    """Запуск задачи с хранением в Redis"""
+    task_id = await redis_storage.create_task()
+
+    await task_queue.add_task(task_id, input_data)
+    
     return {
         "task_id": task_id,
         "status": "queued",
-        "queue_position": task_queue.qsize()
+        "queue_position": await task_queue.get_queue_size(),
+        "storage": "redis"
     }
 
 @tasks_router.get("/{task_id}")
 async def get_task_status(task_id: str):
-    task = get_task(task_id)
+    """Получение статуса задачи из Redis"""
+    task = await redis_storage.get_task(task_id)
     if not task:
         raise HTTPException(status_code=404, detail="Task not found")
     return task
+
+@tasks_router.delete("/{task_id}")
+async def delete_task(task_id: str):
+    """Удаление задачи из Redis"""
+    task = await redis_storage.get_task(task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+    
+    await redis_storage.delete_task(task_id)
+    log_info(f"Задача {task_id} удалена")
+    return {"message": f"Task {task_id} deleted"}
 
 @tasks_router.post("/compute")
 async def compute_sync(data: dict):
@@ -52,33 +63,18 @@ async def compute_sync(data: dict):
     log_success(f"CPU-bound вычисление завершено: {result}")
     return result
 
-@tasks_router.delete("/cleanup")
-async def manual_cleanup():
-    """Ручная очистка старых задач"""
-    before_count = len(tasks_storage)
-    cleanup_old_tasks()
-    after_count = len(tasks_storage)
-    log_info(f"Ручная очистка: удалено {before_count - after_count} задач")
-    return {
-        "message": f"Очищено {before_count - after_count} старых задач",
-        "remaining_tasks": after_count
-    }
-
-@tasks_router.get("/stats")
-async def get_stats():
-    """Статистика по задачам"""
-    stats = {
-        "total_tasks": len(tasks_storage),
-        "queue_size": task_queue.qsize(),
-        "tasks_by_status": {}
-    }
-    
-    for task in tasks_storage.values():
-        status = task["status"]
-        stats["tasks_by_status"][status] = stats["tasks_by_status"].get(status, 0) + 1
-    
+@tasks_router.get("/stats/all")
+async def get_redis_stats():
+    """Статистика из Redis"""
+    stats = await redis_storage.get_stats()
+    stats["queue_size"] = await task_queue.get_queue_size()
     return stats
 
-# Подключаем роутеры
+@tasks_router.get("/active/all")
+async def get_active_tasks():
+    """Список активных задач"""
+    tasks = await redis_storage.get_active_tasks()
+    return {"active_tasks": tasks, "count": len(tasks)}
+
 router.include_router(notify_router)
 router.include_router(tasks_router)
