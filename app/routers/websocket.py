@@ -1,5 +1,5 @@
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
-from app.storage import get_task
+from app.redis_storage import redis_storage
 from app.logger import log_info, log_error
 import asyncio
 import json
@@ -12,27 +12,32 @@ async def websocket_task_status(websocket: WebSocket, task_id: str):
     log_info(f"WebSocket подключен для задачи {task_id}")
     
     try:
+        last_progress = -1
+        
         while True:
-            task = get_task(task_id)
+            task = await redis_storage.get_task(task_id)
+            
             if not task:
                 await websocket.send_json({"error": "Task not found"})
                 log_error(f"WebSocket: задача {task_id} не найдена")
                 break
             
-            # Отправляем текущий статус
-            await websocket.send_json({
-                "task_id": task_id,
-                "status": task.get("status"),
-                "progress": task.get("progress", 0),
-                "result": task.get("result")
-            })
+            current_progress = task.get("progress", 0)
+            if current_progress != last_progress or task.get("status") in ["completed", "error"]:
+                await websocket.send_json({
+                    "task_id": task_id,
+                    "status": task.get("status"),
+                    "progress": current_progress,
+                    "result": task.get("result"),
+                    "timestamp": asyncio.get_event_loop().time()
+                })
+                last_progress = current_progress
             
-            # Если задача завершена или с ошибкой - закрываем соединение
             if task.get("status") in ["completed", "error"]:
-                log_info(f"WebSocket отключен для задачи {task_id} (задача завершена)")
+                log_info(f"WebSocket отключен для задачи {task_id} (завершена)")
                 break
             
-            await asyncio.sleep(1)  # Опрашиваем каждую секунду
+            await asyncio.sleep(0.5)
             
     except WebSocketDisconnect:
         log_info(f"WebSocket отключен для задачи {task_id} (клиент закрыл соединение)")
